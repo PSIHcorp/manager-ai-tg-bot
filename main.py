@@ -451,11 +451,15 @@ class ConnectionManager:
         self.active_connections.remove(websocket)
 
     async def broadcast(self, message: str):
+        disconnected = []
         for connection in self.active_connections:
             try:
                 await connection.send_text(message)
             except Exception as e:
                 logging.error(f"Error broadcasting message: {e}")
+                disconnected.append(connection)
+        for connection in disconnected:
+            self.disconnect(connection)
 
 # Create separate managers for messages and updates
 messages_manager = ConnectionManager()
@@ -860,27 +864,60 @@ async def refresh_token_endpoint(request: Request):
 
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    # Проверяем, является ли пользователь админом
-    notification_manager = notifications.get_notification_manager()
-    if notification_manager:
-        user_username = message.from_user.username
-        if user_username and user_username in notification_manager.admin_usernames:
-            # Сохраняем chat_id админа
-            await notification_manager.save_admin_chat_id(user_username, message.chat.id)
-            
-            # Отправляем приветствие с клавиатурой управления уведомлениями
-            await message.answer(
-                "👋 Добро пожаловать в панель администратора!\n\n"
-                "Здесь вы можете управлять уведомлениями о новых сообщениях.",
-                reply_markup=notification_manager.get_notification_keyboard(user_username)
-            )
-            return
-    
-    # Обычное приветствие для обычных пользователей
-    await message.answer(
-        "Добро пожаловать в Psihclothes!\n"
-        "Можете задать любой вопрос"
-    )
+    async with async_session() as session:
+        chat = await get_chat_by_uuid(session, str(message.chat.id))
+        is_new_chat = False
+        if not chat:
+            chat = await create_chat(session, str(message.chat.id), name=message.chat.first_name, messager="telegram")
+            is_new_chat = True
+            new_chat_message = {
+                "type": "chat_created",
+                "chat": {
+                    "id": chat.id,
+                    "uuid": chat.uuid,
+                    "name": chat.name,
+                    "messager": chat.messager,
+                    "waiting": chat.waiting,
+                    "ai": chat.ai,
+                    "tags": chat.tags,
+                    "last_message_content": None,
+                    "last_message_timestamp": None
+                }
+            }
+            await updates_manager.broadcast(json.dumps(new_chat_message))
+        # Сохраняем команду в БД
+        new_message = Message(
+            chat_id=chat.id,
+            message=message.text,
+            message_type="question",
+            ai=False,
+            created_at=datetime.now()
+        )
+        session.add(new_message)
+        await session.commit()
+        await session.refresh(new_message)
+
+        # Проверяем, является ли пользователь админом
+        notification_manager = notifications.get_notification_manager()
+        if notification_manager:
+            user_username = message.from_user.username
+            if user_username and user_username in notification_manager.admin_usernames:
+                # Сохраняем chat_id админа
+                await notification_manager.save_admin_chat_id(user_username, message.chat.id)
+                
+                # Отправляем приветствие с клавиатурой управления уведомлениями
+                await message.answer(
+                    "👋 Добро пожаловать в панель администратора!\n\n"
+                    "Здесь вы можете управлять уведомлениями о новых сообщениях.",
+                    reply_markup=notification_manager.get_notification_keyboard(user_username)
+                )
+                return
+        
+        # Обычное приветствие для обычных пользователей
+        await message.answer(
+            "Добро пожаловать в Psihclothes!\n"
+            "Можете задать любой вопрос"
+        )
 
 @dp.callback_query(lambda c: c.data.startswith("notifications_"))
 async def handle_notification_toggle(callback: types.CallbackQuery):
@@ -907,25 +944,58 @@ async def handle_notification_toggle(callback: types.CallbackQuery):
 @dp.message(Command("notifications"))
 async def cmd_notifications(message: Message):
     """Команда для вызова панели управления уведомлениями"""
-    notification_manager = notifications.get_notification_manager()
-    if not notification_manager:
-        await message.answer("Ошибка: менеджер уведомлений не инициализирован")
-        return
-    
-    user_username = message.from_user.username
-    if not user_username or user_username not in notification_manager.admin_usernames:
-        await message.answer("⛔ У вас нет доступа к панели администратора.")
-        return
-    
-    # Сохраняем chat_id админа
-    await notification_manager.save_admin_chat_id(user_username, message.chat.id)
-    
-    # Отправляем панель управления уведомлениями
-    await message.answer(
-        "🔔 Панель управления уведомлениями\n\n"
-        "Здесь вы можете управлять уведомлениями о новых сообщениях.",
-        reply_markup=notification_manager.get_notification_keyboard(user_username)
-    )
+    async with async_session() as session:
+        chat = await get_chat_by_uuid(session, str(message.chat.id))
+        is_new_chat = False
+        if not chat:
+            chat = await create_chat(session, str(message.chat.id), name=message.chat.first_name, messager="telegram")
+            is_new_chat = True
+            new_chat_message = {
+                "type": "chat_created",
+                "chat": {
+                    "id": chat.id,
+                    "uuid": chat.uuid,
+                    "name": chat.name,
+                    "messager": chat.messager,
+                    "waiting": chat.waiting,
+                    "ai": chat.ai,
+                    "tags": chat.tags,
+                    "last_message_content": None,
+                    "last_message_timestamp": None
+                }
+            }
+            await updates_manager.broadcast(json.dumps(new_chat_message))
+        # Сохраняем команду в БД
+        new_message = Message(
+            chat_id=chat.id,
+            message=message.text,
+            message_type="question",
+            ai=False,
+            created_at=datetime.now()
+        )
+        session.add(new_message)
+        await session.commit()
+        await session.refresh(new_message)
+
+        notification_manager = notifications.get_notification_manager()
+        if not notification_manager:
+            await message.answer("Ошибка: менеджер уведомлений не инициализирован")
+            return
+        
+        user_username = message.from_user.username
+        if not user_username or user_username not in notification_manager.admin_usernames:
+            await message.answer("⛔ У вас нет доступа к панели администратора.")
+            return
+        
+        # Сохраняем chat_id админа
+        await notification_manager.save_admin_chat_id(user_username, message.chat.id)
+        
+        # Отправляем панель управления уведомлениями
+        await message.answer(
+            "🔔 Панель управления уведомлениями\n\n"
+            "Здесь вы можете управлять уведомлениями о новых сообщениях.",
+            reply_markup=notification_manager.get_notification_keyboard(user_username)
+        )
 
 @dp.message(F.text)
 async def handle_message(message: Message):
@@ -1035,6 +1105,8 @@ async def handle_message(message: Message):
                         }
                         # Отправляем на фронтенд по WebSocket
                         await messages_manager.broadcast(json.dumps(message_for_frontend))
+                    else:
+                        await message.answer("Извините, не удалось получить ответ. Попробуйте позже.")
                     if "manager" in data and data["manager"] == "true":
                         await update_chat_waiting(db=session, chat_id=chat.id, waiting=True)
                         await update_chat_ai(db=session, chat_id=chat.id, ai=False)
@@ -1088,6 +1160,26 @@ async def handle_photos(message: types.Message):
         async with async_session() as session:
             # Создаем сообщение в базе данных
             chat = await get_chat_by_uuid(session, str(message.chat.id))
+            is_new_chat = False
+            if not chat:
+                chat = await create_chat(session, str(message.chat.id), name=message.chat.first_name, messager="telegram")
+                is_new_chat = True
+                new_chat_message = {
+                    "type": "chat_created",
+                    "chat": {
+                        "id": chat.id,
+                        "uuid": chat.uuid,
+                        "name": chat.name,
+                        "messager": chat.messager,
+                        "waiting": chat.waiting,
+                        "ai": chat.ai,
+                        "tags": chat.tags,
+                        "last_message_content": None,
+                        "last_message_timestamp": None
+                    }
+                }
+                await updates_manager.broadcast(json.dumps(new_chat_message))
+
             new_message = Message(
                 chat_id=chat.id,
                 message=f"http://{APP_HOST}:9000/{BUCKET_NAME}/{file_name}",
@@ -1113,6 +1205,28 @@ async def handle_photos(message: types.Message):
             # Отправляем на фронтенд по WebSocket
             await messages_manager.broadcast(json.dumps(message_for_frontend))
 
+            # Если есть подпись к фото — сохраняем отдельным сообщением
+            if message.caption:
+                caption_message = Message(
+                    chat_id=chat.id,
+                    message=message.caption,
+                    message_type="question",
+                    ai=False,
+                    created_at=datetime.now()
+                )
+                session.add(caption_message)
+                await session.commit()
+                await session.refresh(caption_message)
+                await messages_manager.broadcast(json.dumps({
+                    "type": "message",
+                    "chatId": str(caption_message.chat_id),
+                    "content": caption_message.message,
+                    "message_type": caption_message.message_type,
+                    "ai": caption_message.ai,
+                    "timestamp": caption_message.created_at.isoformat(),
+                    "id": caption_message.id
+                }))
+
             update_message = {
                 "type": "chat_update",
                 "chat_id": chat.id,
@@ -1131,6 +1245,70 @@ async def handle_photos(message: types.Message):
     else:
         await message.reply("Произошла ошибка при загрузке фото")
 
+
+@dp.message()
+async def handle_unsupported(message: types.Message):
+    """Catch-all для неподдерживаемых типов сообщений (голосовые, видео, документы и т.д.)"""
+    async with async_session() as session:
+        chat = await get_chat_by_uuid(session, str(message.chat.id))
+        is_new_chat = False
+        if not chat:
+            chat = await create_chat(session, str(message.chat.id), name=message.chat.first_name, messager="telegram")
+            is_new_chat = True
+            new_chat_message = {
+                "type": "chat_created",
+                "chat": {
+                    "id": chat.id,
+                    "uuid": chat.uuid,
+                    "name": chat.name,
+                    "messager": chat.messager,
+                    "waiting": chat.waiting,
+                    "ai": chat.ai,
+                    "tags": chat.tags,
+                    "last_message_content": None,
+                    "last_message_timestamp": None
+                }
+            }
+            await updates_manager.broadcast(json.dumps(new_chat_message))
+        
+        content_type = message.content_type if message.content_type else "unknown"
+        new_message = Message(
+            chat_id=chat.id,
+            message=f"[unsupported:{content_type}]",
+            message_type="question",
+            ai=False,
+            created_at=datetime.now()
+        )
+        session.add(new_message)
+        await session.commit()
+        await session.refresh(new_message)
+        
+        await messages_manager.broadcast(json.dumps({
+            "type": "message",
+            "chatId": str(new_message.chat_id),
+            "content": new_message.message,
+            "message_type": new_message.message_type,
+            "ai": new_message.ai,
+            "timestamp": new_message.created_at.isoformat(),
+            "id": new_message.id
+        }))
+        
+        await update_chat_waiting(db=session, chat_id=chat.id, waiting=True)
+        await updates_manager.broadcast(json.dumps({
+            "type": "chat_update",
+            "chat_id": chat.id,
+            "waiting": True
+        }))
+        
+        notification_manager = notifications.get_notification_manager()
+        if notification_manager:
+            await notification_manager.send_waiting_notification(
+                chat_id=message.chat.id,
+                chat_name=message.chat.first_name or str(message.chat.id),
+                messager="telegram"
+            )
+    
+    await message.answer("Извините, этот тип сообщений пока не поддерживается. Пожалуйста, напишите текстом.")
 
 
 if __name__ == "__main__":
