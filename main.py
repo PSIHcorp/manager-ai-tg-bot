@@ -102,6 +102,9 @@ async def handle_events():
             logging.error(f"Error getting VK user info: {e}")
             user_name = str(user_id)
 
+        # Определяем, ответ ли это от паблика
+        is_from_group = (user_id == -VK_GROUP_ID)
+
         # --- 1) Работа с чатом в БД, WebSocket-апдейты ---
         async with async_session() as session:
             # Получаем или создаём чат
@@ -131,101 +134,68 @@ async def handle_events():
 
             # --- 2) Текстовое сообщение ---
             if text:
-                # Создаём запись вопроса
-                db_msg = Message(
-                    chat_id=chat.id,
-                    message=text,
-                    message_type="question",
-                    ai=False,
-                    created_at=datetime.now()
-                )
-                session.add(db_msg)
-                await session.commit()
-                await session.refresh(db_msg)
+                if is_from_group:
+                    # Сообщение от админа/паблика — сохраняем как answer
+                    db_msg = Message(
+                        chat_id=chat.id,
+                        message=text,
+                        message_type="answer",
+                        ai=True,
+                        created_at=datetime.now()
+                    )
+                    session.add(db_msg)
+                    await session.commit()
+                    await session.refresh(db_msg)
 
-                # Шлём фронту через WS
-                message_for_frontend = {
-                    "type": "message",
-                    "chatId": str(db_msg.chat_id),
-                    "content": db_msg.message,
-                    "message_type": db_msg.message_type,
-                    "ai": db_msg.ai,
-                    "timestamp": db_msg.created_at.isoformat(),
-                    "id": db_msg.id
-                }
-                await messages_manager.broadcast(json.dumps(message_for_frontend))
+                    await messages_manager.broadcast(json.dumps({
+                        "type": "message",
+                        "chatId": str(db_msg.chat_id),
+                        "content": db_msg.message,
+                        "message_type": db_msg.message_type,
+                        "ai": db_msg.ai,
+                        "timestamp": db_msg.created_at.isoformat(),
+                        "id": db_msg.id
+                    }))
 
-                # Если AI выключен — обновляем waiting и выходим
-                if not chat.ai:
-                    await update_chat_waiting(db=session, chat_id=chat.id, waiting=True)
+                    # Сбрасываем waiting, т.к. менеджер ответил
+                    await update_chat_waiting(db=session, chat_id=chat.id, waiting=False)
                     await updates_manager.broadcast(json.dumps({
                         "type": "chat_update",
                         "chat_id": chat.id,
-                        "waiting": True
+                        "waiting": False
                     }))
-                    
-                    # Отправляем уведомление админам
-                    notification_manager = notifications.get_notification_manager()
-                    if notification_manager:
-                        await notification_manager.send_waiting_notification(
-                            chat_id=peer_id,
-                            chat_name=user_name,
-                            messager="vk"
-                        )
                 else:
-                    # --- 3) Отправляем вопрос AI-сервису и ждём ответ ---
-                    async with aiohttp.ClientSession() as http_sess:
-                        try:
-                            resp = await http_sess.post(
-                                API_URL,
-                                json={"question": text, "chat_id": chat.id}
-                            )
-                            data = await resp.json()
-                        except Exception as e:
-                            logging.error(f"AI request error: {e}")
-                            continue
+                    # Сообщение от пользователя
+                    db_msg = Message(
+                        chat_id=chat.id,
+                        message=text,
+                        message_type="question",
+                        ai=False,
+                        created_at=datetime.now()
+                    )
+                    session.add(db_msg)
+                    await session.commit()
+                    await session.refresh(db_msg)
 
-                    # Если пришёл ответ
-                    if data.get("answer"):
-                        answer = data["answer"]
-                        # Отправляем ответ обратно в VK
-                        await asyncio.to_thread(
-                            vk.messages.send,
-                            peer_id=peer_id,
-                            message=answer,
-                            random_id=0
-                        )
-                        # Сохраняем ответ в БД
-                        db_ans = Message(
-                            chat_id=chat.id,
-                            message=answer,
-                            message_type="answer",
-                            ai=True,
-                            created_at=datetime.now()
-                        )
-                        session.add(db_ans)
-                        await session.commit()
-                        await session.refresh(db_ans)
-                        # Шлём фронту
-                        await messages_manager.broadcast(json.dumps({
-                            "type": "message",
-                            "chatId": str(db_ans.chat_id),
-                            "content": db_ans.message,
-                            "message_type": db_ans.message_type,
-                            "ai": db_ans.ai,
-                            "timestamp": db_ans.created_at.isoformat(),
-                            "id": db_ans.id
-                        }))
+                    # Шлём фронту через WS
+                    message_for_frontend = {
+                        "type": "message",
+                        "chatId": str(db_msg.chat_id),
+                        "content": db_msg.message,
+                        "message_type": db_msg.message_type,
+                        "ai": db_msg.ai,
+                        "timestamp": db_msg.created_at.isoformat(),
+                        "id": db_msg.id
+                    }
+                    await messages_manager.broadcast(json.dumps(message_for_frontend))
 
-                    # Если сервис переключил на менеджера
-                    if data.get("manager") == "true":
+                    # Если AI выключен — обновляем waiting и выходим
+                    if not chat.ai:
                         await update_chat_waiting(db=session, chat_id=chat.id, waiting=True)
-                        await update_chat_ai(db=session, chat_id=chat.id, ai=False)
                         await updates_manager.broadcast(json.dumps({
                             "type": "chat_update",
                             "chat_id": chat.id,
-                            "waiting": True,
-                            "ai": False
+                            "waiting": True
                         }))
                         
                         # Отправляем уведомление админам
@@ -236,6 +206,70 @@ async def handle_events():
                                 chat_name=user_name,
                                 messager="vk"
                             )
+                    else:
+                        # --- 3) Отправляем вопрос AI-сервису и ждём ответ ---
+                        async with aiohttp.ClientSession() as http_sess:
+                            try:
+                                resp = await http_sess.post(
+                                    API_URL,
+                                    json={"question": text, "chat_id": chat.id}
+                                )
+                                data = await resp.json()
+                            except Exception as e:
+                                logging.error(f"AI request error: {e}")
+                                continue
+
+                        # Если пришёл ответ
+                        if data.get("answer"):
+                            answer = data["answer"]
+                            # Отправляем ответ обратно в VK
+                            await asyncio.to_thread(
+                                vk.messages.send,
+                                peer_id=peer_id,
+                                message=answer,
+                                random_id=0
+                            )
+                            # Сохраняем ответ в БД
+                            db_ans = Message(
+                                chat_id=chat.id,
+                                message=answer,
+                                message_type="answer",
+                                ai=True,
+                                created_at=datetime.now()
+                            )
+                            session.add(db_ans)
+                            await session.commit()
+                            await session.refresh(db_ans)
+                            # Шлём фронту
+                            await messages_manager.broadcast(json.dumps({
+                                "type": "message",
+                                "chatId": str(db_ans.chat_id),
+                                "content": db_ans.message,
+                                "message_type": db_ans.message_type,
+                                "ai": db_ans.ai,
+                                "timestamp": db_ans.created_at.isoformat(),
+                                "id": db_ans.id
+                            }))
+
+                        # Если сервис переключил на менеджера
+                        if data.get("manager") == "true":
+                            await update_chat_waiting(db=session, chat_id=chat.id, waiting=True)
+                            await update_chat_ai(db=session, chat_id=chat.id, ai=False)
+                            await updates_manager.broadcast(json.dumps({
+                                "type": "chat_update",
+                                "chat_id": chat.id,
+                                "waiting": True,
+                                "ai": False
+                            }))
+                            
+                            # Отправляем уведомление админам
+                            notification_manager = notifications.get_notification_manager()
+                            if notification_manager:
+                                await notification_manager.send_waiting_notification(
+                                    chat_id=peer_id,
+                                    chat_name=user_name,
+                                    messager="vk"
+                                )
 
             # --- 4) Обработка фото-вложений ---
             for att in attachments:
@@ -311,7 +345,7 @@ async def handle_events():
                         file_size,
                         content_type="image/jpeg"
                     )
-                    img_url = f"http://{APP_HOST}:9000/{BUCKET_NAME}/{file_name}"
+                    img_url = f"{MINIO_PUBLIC_URL}/{BUCKET_NAME}/{file_name}"
                     logging.info(f"Successfully uploaded to MinIO: {img_url}")
                 except Exception as e:
                     logging.error(f"MinIO upload error: {e}")
@@ -319,14 +353,24 @@ async def handle_events():
 
                 # Сохраняем как сообщение
                 try:
-                    db_img = Message(
-                        chat_id=chat.id,
-                        message=img_url,
-                        message_type="question",
-                        ai=False,
-                        created_at=datetime.now(),
-                        is_image=True
-                    )
+                    if is_from_group:
+                        db_img = Message(
+                            chat_id=chat.id,
+                            message=img_url,
+                            message_type="answer",
+                            ai=True,
+                            created_at=datetime.now(),
+                            is_image=True
+                        )
+                    else:
+                        db_img = Message(
+                            chat_id=chat.id,
+                            message=img_url,
+                            message_type="question",
+                            ai=False,
+                            created_at=datetime.now(),
+                            is_image=True
+                        )
                     session.add(db_img)
                     await session.commit()
                     await session.refresh(db_img)
@@ -346,21 +390,29 @@ async def handle_events():
                     "is_image": True
                 }))
                 # Обновление waiting
-                await update_chat_waiting(db=session, chat_id=chat.id, waiting=True)
-                await updates_manager.broadcast(json.dumps({
-                    "type": "chat_update",
-                    "chat_id": chat.id,
-                    "waiting": True
-                }))
-                
-                # Отправляем уведомление админам
-                notification_manager = notifications.get_notification_manager()
-                if notification_manager:
-                    await notification_manager.send_waiting_notification(
-                        chat_id=peer_id,
-                        chat_name=user_name,
-                        messager="vk"
-                    )
+                if is_from_group:
+                    await update_chat_waiting(db=session, chat_id=chat.id, waiting=False)
+                    await updates_manager.broadcast(json.dumps({
+                        "type": "chat_update",
+                        "chat_id": chat.id,
+                        "waiting": False
+                    }))
+                else:
+                    await update_chat_waiting(db=session, chat_id=chat.id, waiting=True)
+                    await updates_manager.broadcast(json.dumps({
+                        "type": "chat_update",
+                        "chat_id": chat.id,
+                        "waiting": True
+                    }))
+                    
+                    # Отправляем уведомление админам
+                    notification_manager = notifications.get_notification_manager()
+                    if notification_manager:
+                        await notification_manager.send_waiting_notification(
+                            chat_id=peer_id,
+                            chat_name=user_name,
+                            messager="vk"
+                        )
 
 async def start_vk_bot():
     loop = asyncio.get_running_loop()
@@ -376,6 +428,7 @@ dp = Dispatcher()
 # API endpoint for sending questions
 API_URL = os.getenv("API_URL", "http://pavel")
 APP_HOST = os.getenv("APP_HOST", "localhost")
+MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", f"http://{APP_HOST}:9000")
 MINIO_LOGIN = os.getenv("MINIO_LOGIN")
 MINIO_PWD = os.getenv("MINIO_PWD")
 
@@ -404,7 +457,7 @@ async def lifespan(app: FastAPI):
     tg_task = asyncio.create_task(dp.start_polling(bot))
     
     # Запускаем VK бота
-    # vk_task = asyncio.create_task(start_vk_bot())
+    vk_task = asyncio.create_task(start_vk_bot())
     
     yield
     
@@ -416,11 +469,11 @@ async def lifespan(app: FastAPI):
         pass
 
     # Завершаем VK-бота
-    # vk_task.cancel()
-    # try:
-    #     await vk_task
-    # except asyncio.CancelledError:
-    #     pass
+    vk_task.cancel()
+    try:
+        await vk_task
+    except asyncio.CancelledError:
+        pass
 
 app = FastAPI(lifespan=lifespan)
 
@@ -732,7 +785,7 @@ async def upload_image(
             len(content),
             content_type="image/jpeg"
         )
-        img_url = f"http://{APP_HOST}:9000/{BUCKET_NAME}/{file_name}"
+        img_url = f"{MINIO_PUBLIC_URL}/{BUCKET_NAME}/{file_name}"
     except Exception as e:
         logging.error(f"MinIO upload error: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload image")
@@ -1182,7 +1235,7 @@ async def handle_photos(message: types.Message):
 
             new_message = Message(
                 chat_id=chat.id,
-                message=f"http://{APP_HOST}:9000/{BUCKET_NAME}/{file_name}",
+                message=f"{MINIO_PUBLIC_URL}/{BUCKET_NAME}/{file_name}",
                 message_type="question",
                 ai=False,
                 created_at=datetime.now(),
