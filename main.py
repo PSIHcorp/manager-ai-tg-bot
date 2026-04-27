@@ -18,7 +18,7 @@ from crud import (
     get_chats_with_last_messages, get_chat_messages, get_chat_by_uuid,
     add_chat_tag, remove_chat_tag,
     create_sticker, get_all_stickers, get_sticker_by_id, get_sticker_by_file_unique_id, delete_sticker,
-    update_message, delete_message
+    update_message, delete_message, get_existing_external_ids
 )
 import requests
 from pydantic import BaseModel
@@ -632,6 +632,70 @@ async def read_messages(
     _: bool = Depends(auth.require_auth)
 ):
     return await get_chat_messages(db, chat_id)
+
+@app.post("/api/chats/{chat_id}/sync-vk")
+async def sync_vk_chat_endpoint(
+    chat_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth.require_auth)
+):
+    chat = await get_chat(db, chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    if chat.messager != "vk":
+        raise HTTPException(status_code=400, detail="Chat is not a VK chat")
+
+    try:
+        history = await asyncio.to_thread(
+            vk.messages.getHistory,
+            peer_id=int(chat.uuid),
+            count=200,
+            extended=0
+        )
+    except Exception as e:
+        logging.error(f"Error fetching VK history: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to fetch VK history: {str(e)}")
+
+    vk_messages = history.get('items', [])
+    if not vk_messages:
+        return {"success": True, "message": "No messages found in VK history", "vk_count": 0, "db_count_before": 0, "db_count_after": 0}
+
+    existing_ids = await get_existing_external_ids(db, chat_id)
+    db_count_before = len(existing_ids)
+
+    imported = 0
+    for msg in reversed(vk_messages):
+        ext_id = str(msg.get('id'))
+        if ext_id in existing_ids:
+            continue
+
+        from_id = msg.get('from_id', 0)
+        text = msg.get('text', '')
+
+        is_from_bot = from_id < 0 and abs(from_id) == VK_GROUP_ID
+        is_ai = is_from_bot
+
+        if not text and msg.get('attachments'):
+            continue
+
+        await create_message(
+            db=db,
+            chat_id=chat_id,
+            message=text,
+            message_type="text",
+            ai=is_ai,
+            external_message_id=ext_id
+        )
+        imported += 1
+        existing_ids.add(ext_id)
+
+    return {
+        "success": True,
+        "message": f"Imported {imported} messages from VK",
+        "vk_count": len(vk_messages),
+        "db_count_before": db_count_before,
+        "db_count_after": db_count_before + imported
+    }
 
 # Schemas
 class ChatCreate(BaseModel):

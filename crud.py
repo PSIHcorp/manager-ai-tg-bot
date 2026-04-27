@@ -87,6 +87,14 @@ async def get_messages(db: AsyncSession, chat_id: int):
     )
     return result.scalars().all()
 
+async def get_existing_external_ids(db: AsyncSession, chat_id: int):
+    result = await db.execute(
+        select(Message.external_message_id)
+        .filter(Message.chat_id == chat_id)
+        .filter(Message.external_message_id.isnot(None))
+    )
+    return {row[0] for row in result.all()}
+
 async def create_chat(db: AsyncSession, uuid: str, ai: bool = True, name: str = "Не известно", tags: List[str] = None, messager: str = "telegram"):
     new_chat = Chat(
         uuid=uuid,
