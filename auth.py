@@ -7,32 +7,29 @@ from typing import Optional
 DISABLE_AUTH = os.getenv("DISABLE_AUTH", "false").lower() == "true"
 
 # Конфигурация сервиса аутентификации
-AUTH_SERVICE_BASE_URL = "http://87.242.85.68:8000"
-CHECK_PERMISSIONS_URL = f"{AUTH_SERVICE_BASE_URL}/api/jwt/check-permissions"
-REFRESH_TOKEN_URL = f"{AUTH_SERVICE_BASE_URL}/api/jwt/refresh/"
+AUTH_SERVICE_BASE_URL = os.getenv("AUTH_SERVICE_BASE_URL", "http://109.172.36.219:8000")
+CHECK_ME_URL = f"{AUTH_SERVICE_BASE_URL}/api/auth/me"
 
 async def check_permissions(token: str, permission: str = "message") -> bool:
     """
-    Проверяет разрешения пользователя через сервис аутентификации
+    Проверяет валидность токена через сервис аутентификации (GET /api/auth/me)
     
     Args:
         token: JWT токен
         permission: Требуемое разрешение (по умолчанию "message")
     
     Returns:
-        bool: True если пользователь авторизован и имеет разрешение
+        bool: True если токен валиден
     """
     headers = {
-        "accept": "*/*",
+        "accept": "application/json",
         "Authorization": f"Bearer {token}"
     }
     
-    params = {"permission": permission}
-    
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(CHECK_PERMISSIONS_URL, headers=headers, params=params) as response:
-                if response.status == 204:
+            async with session.get(CHECK_ME_URL, headers=headers) as response:
+                if response.status == 200:
                     return True
                 else:
                     logging.warning(f"Permission check failed: {response.status}")
@@ -44,29 +41,10 @@ async def check_permissions(token: str, permission: str = "message") -> bool:
 async def refresh_token(token: str) -> Optional[dict]:
     """
     Обновляет JWT токен через сервис аутентификации
-    
-    Args:
-        token: Текущий JWT токен
-    
-    Returns:
-        dict: Ответ от сервера аутентификации или None в случае ошибки
+    (не поддерживается текущим auth-сервисом, возвращает None)
     """
-    headers = {
-        "accept": "application/json",
-        "Authorization": f"Bearer {token}"
-    }
-    
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(REFRESH_TOKEN_URL, headers=headers, data="") as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    logging.warning(f"Token refresh failed: {response.status}")
-                    return None
-    except Exception as e:
-        logging.error(f"Error refreshing token: {e}")
-        return None
+    logging.warning("Token refresh not supported by current auth service")
+    return None
 
 async def get_token_from_header(request: Request) -> Optional[str]:
     """
