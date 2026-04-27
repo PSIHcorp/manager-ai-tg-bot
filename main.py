@@ -682,7 +682,7 @@ async def sync_vk_chat_endpoint(
             db=db,
             chat_id=chat_id,
             message=text,
-            message_type="text",
+            message_type="answer" if is_ai else "question",
             ai=is_ai,
             external_message_id=ext_id
         )
