@@ -12,7 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
-from crud import async_session, engine, Base, get_chats, get_chat, get_messages, create_chat, create_message, update_chat_waiting, update_chat_ai, get_stats, get_chats_with_last_messages, get_chat_messages, get_chat_by_uuid, add_chat_tag, remove_chat_tag
+from crud import (
+    async_session, engine, Base, get_chats, get_chat, get_messages, create_chat,
+    create_message, update_chat_waiting, update_chat_ai, get_stats,
+    get_chats_with_last_messages, get_chat_messages, get_chat_by_uuid,
+    add_chat_tag, remove_chat_tag,
+    create_sticker, get_all_stickers, get_sticker_by_id, get_sticker_by_file_unique_id, delete_sticker
+)
 import requests
 from pydantic import BaseModel
 from shared import get_bot
@@ -428,6 +434,7 @@ dp = Dispatcher()
 # API endpoint for sending questions
 API_URL = os.getenv("API_URL", "http://pavel")
 APP_HOST = os.getenv("APP_HOST", "localhost")
+STICKER_SOURCE_TG_ID = os.getenv("STICKER_SOURCE_TG_ID")
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", f"http://{APP_HOST}:9000")
 MINIO_LOGIN = os.getenv("MINIO_LOGIN")
 MINIO_PWD = os.getenv("MINIO_PWD")
@@ -715,6 +722,129 @@ async def update_ai(chat_id: int, data: AIUpdate, db: AsyncSession = Depends(get
 @app.get("/api/stats")
 async def stats(db: AsyncSession = Depends(get_db), _: bool = Depends(auth.require_auth)):
     return await get_stats(db)
+
+
+# ─── Sticker endpoints ───────────────────────────────────────────
+
+@app.get("/api/stickers")
+async def list_stickers(db: AsyncSession = Depends(get_db), _: bool = Depends(auth.require_auth)):
+    """Возвращает список всех сохранённых стикеров."""
+    stickers = await get_all_stickers(db)
+    return [
+        {
+            "id": s.id,
+            "file_id": s.file_id,
+            "file_unique_id": s.file_unique_id,
+            "emoji": s.emoji,
+            "set_name": s.set_name,
+            "custom_tag": s.custom_tag,
+            "is_animated": s.is_animated,
+            "is_video": s.is_video,
+            "file_url": s.file_url,
+            "created_at": s.created_at.isoformat() if s.created_at else None
+        }
+        for s in stickers
+    ]
+
+
+class StickerMessageCreate(BaseModel):
+    chat_id: int
+    sticker_id: int
+
+
+class StickerTagUpdate(BaseModel):
+    tag: str
+
+
+@app.post("/api/messages/sticker")
+async def send_sticker_message(
+    data: StickerMessageCreate,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth.require_auth)
+):
+    """Отправляет сохранённый стикер в указанный чат."""
+    chat = await get_chat(db, data.chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    sticker = await get_sticker_by_id(db, data.sticker_id)
+    if not sticker:
+        raise HTTPException(status_code=404, detail="Sticker not found")
+
+    # Отправка в мессенджер
+    try:
+        if chat.messager == "telegram":
+            await bot.send_sticker(chat_id=chat.uuid, sticker=sticker.file_id)
+        else:
+            raise HTTPException(status_code=400, detail="Stickers are supported for Telegram only")
+    except Exception as e:
+        logging.error(f"Error sending sticker: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to send sticker: {e}")
+
+    # Сохраняем в БД как сообщение
+    db_msg = Message(
+        chat_id=chat.id,
+        message=sticker.emoji or "[sticker]",
+        message_type="answer",
+        ai=False,
+        created_at=datetime.now(),
+        is_sticker=True
+    )
+    db.add(db_msg)
+    await db.commit()
+    await db.refresh(db_msg)
+
+    # WebSocket broadcast
+    message_for_frontend = {
+        "type": "message",
+        "chatId": str(db_msg.chat_id),
+        "content": db_msg.message,
+        "message_type": db_msg.message_type,
+        "ai": db_msg.ai,
+        "timestamp": db_msg.created_at.isoformat(),
+        "id": db_msg.id,
+        "is_sticker": True,
+        "sticker_file_id": sticker.file_id
+    }
+    await messages_manager.broadcast(json.dumps(message_for_frontend))
+
+    return {"success": True, "message_id": db_msg.id}
+
+
+@app.put("/api/stickers/{sticker_id}")
+async def update_sticker_tag(
+    sticker_id: int,
+    tag_data: StickerTagUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth.require_auth)
+):
+    """Обновляет custom_tag (псевдоним/категорию) стикера."""
+    sticker = await get_sticker_by_id(db, sticker_id)
+    if not sticker:
+        raise HTTPException(status_code=404, detail="Sticker not found")
+    sticker.custom_tag = tag_data.tag
+    await db.commit()
+    await db.refresh(sticker)
+    return {
+        "id": sticker.id,
+        "custom_tag": sticker.custom_tag,
+        "emoji": sticker.emoji,
+        "file_unique_id": sticker.file_unique_id
+    }
+
+
+@app.delete("/api/stickers/{sticker_id}")
+async def remove_sticker(
+    sticker_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth.require_auth)
+):
+    """Удаляет стикер из библиотеки бота."""
+    ok = await delete_sticker(db, sticker_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Sticker not found")
+    return {"success": True}
+
 
 class TagCreate(BaseModel):
     tag: str
@@ -1307,6 +1437,74 @@ async def handle_photos(message: types.Message):
                 )
     else:
         await message.reply("Произошла ошибка при загрузке фото")
+
+
+@dp.message(F.sticker)
+async def handle_sticker(message: types.Message):
+    """
+    Приём стикеров от доверенного источника (STICKER_SOURCE_TG_ID).
+    Сохраняет file_id в БД для последующей отправки в другие чаты.
+    """
+    if not STICKER_SOURCE_TG_ID:
+        await message.answer("❌ Приём стикеров отключён: не задан STICKER_SOURCE_TG_ID в конфиге.")
+        return
+
+    try:
+        source_tg_id = int(STICKER_SOURCE_TG_ID)
+    except ValueError:
+        await message.answer("❌ Ошибка конфигурации: STICKER_SOURCE_TG_ID должен быть числом.")
+        return
+
+    if message.from_user.id != source_tg_id:
+        await message.answer("⛔ У вас нет прав на добавление стикеров.")
+        return
+
+    sticker = message.sticker
+    async with async_session() as session:
+        existing = await get_sticker_by_file_unique_id(session, sticker.file_unique_id)
+        if existing:
+            await message.answer(f"⚠️ Этот стикер уже сохранён (ID: {existing.id}, эмодзи: {existing.emoji})")
+            return
+
+        # Download sticker file and upload to MinIO for thumbnail preview
+        file_url = None
+        try:
+            tg_file = await bot.get_file(sticker.file_id)
+            file_data = await bot.download_file(tg_file.file_path)
+            ext = ".webm" if sticker.is_video else ".tgs" if sticker.is_animated else ".webp"
+            file_name = f"stickers/{sticker.file_unique_id}{ext}"
+            file_bytes = file_data.read() if hasattr(file_data, "read") else file_data
+            file_size = len(file_bytes)
+            file_stream = io.BytesIO(file_bytes)
+            content_type = "video/webm" if sticker.is_video else "application/x-tgsticker" if sticker.is_animated else "image/webp"
+            await asyncio.to_thread(
+                minio_client.put_object,
+                BUCKET_NAME,
+                file_name,
+                file_stream,
+                file_size,
+                content_type=content_type
+            )
+            file_url = f"{MINIO_PUBLIC_URL}/{BUCKET_NAME}/{file_name}"
+        except Exception as e:
+            logging.warning(f"Не удалось загрузить превью стикера в MinIO: {e}")
+
+        new_sticker = await create_sticker(
+            session,
+            file_id=sticker.file_id,
+            file_unique_id=sticker.file_unique_id,
+            emoji=sticker.emoji or "",
+            set_name=sticker.set_name,
+            is_animated=sticker.is_animated,
+            is_video=sticker.is_video,
+            file_url=file_url
+        )
+        await message.answer(
+            f"✅ Стикер сохранён!\n"
+            f"ID в базе: {new_sticker.id}\n"
+            f"Эмодзи: {new_sticker.emoji}\n"
+            f"Set: {new_sticker.set_name or '—'}"
+        )
 
 
 @dp.message()

@@ -45,7 +45,22 @@ class Message(Base):
     ai = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     is_image = Column(Boolean, default=False)
+    is_sticker = Column(Boolean, default=False)
     chat = relationship("Chat", back_populates="messages")
+
+
+class Sticker(Base):
+    __tablename__ = "stickers"
+    id = Column(Integer, primary_key=True, index=True)
+    file_id = Column(String, nullable=False)
+    file_unique_id = Column(String, unique=True, nullable=False)
+    emoji = Column(String, default="")
+    set_name = Column(String, nullable=True)
+    custom_tag = Column(String, nullable=True)
+    is_animated = Column(Boolean, default=False)
+    is_video = Column(Boolean, default=False)
+    file_url = Column(String, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
 
 # CRUD operations
@@ -187,7 +202,8 @@ async def get_chat_messages(db: AsyncSession, chat_id: int) -> List[Dict[str, An
             "ai": msg.ai,
             "timestamp": msg.created_at.isoformat() if msg.created_at else None,
             "chatId": str(chat_id),
-            "is_image": msg.is_image
+            "is_image": msg.is_image,
+            "is_sticker": msg.is_sticker
         }
         for msg in messages
     ]
@@ -233,3 +249,64 @@ async def remove_chat_tag(db: AsyncSession, chat_id: int, tag: str) -> dict:
     except Exception as e:
         await db.rollback()
         return {"message": "error"}
+
+
+# ─── Sticker CRUD ────────────────────────────────────────────────
+
+async def create_sticker(
+    db: AsyncSession,
+    file_id: str,
+    file_unique_id: str,
+    emoji: str = "",
+    set_name: Optional[str] = None,
+    custom_tag: Optional[str] = None,
+    is_animated: bool = False,
+    is_video: bool = False,
+    file_url: Optional[str] = None
+) -> Sticker:
+    new_sticker = Sticker(
+        file_id=file_id,
+        file_unique_id=file_unique_id,
+        emoji=emoji,
+        set_name=set_name,
+        custom_tag=custom_tag,
+        is_animated=is_animated,
+        is_video=is_video,
+        file_url=file_url
+    )
+    db.add(new_sticker)
+    try:
+        await db.commit()
+        await db.refresh(new_sticker)
+        return new_sticker
+    except SQLAlchemyError:
+        await db.rollback()
+        raise
+
+
+async def get_all_stickers(db: AsyncSession):
+    result = await db.execute(select(Sticker).order_by(Sticker.id.desc()))
+    return result.scalars().all()
+
+
+async def get_sticker_by_id(db: AsyncSession, sticker_id: int) -> Optional[Sticker]:
+    result = await db.execute(select(Sticker).filter(Sticker.id == sticker_id))
+    return result.scalar_one_or_none()
+
+
+async def get_sticker_by_file_unique_id(db: AsyncSession, file_unique_id: str) -> Optional[Sticker]:
+    result = await db.execute(select(Sticker).filter(Sticker.file_unique_id == file_unique_id))
+    return result.scalar_one_or_none()
+
+
+async def delete_sticker(db: AsyncSession, sticker_id: int) -> bool:
+    sticker = await get_sticker_by_id(db, sticker_id)
+    if not sticker:
+        return False
+    try:
+        await db.delete(sticker)
+        await db.commit()
+        return True
+    except SQLAlchemyError:
+        await db.rollback()
+        return False
