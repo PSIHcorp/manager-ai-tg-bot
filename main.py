@@ -495,9 +495,16 @@ async def lifespan(app: FastAPI):
 app = FastAPI(lifespan=lifespan)
 
 # Увеличиваем лимит размера файла до 10MB
+# Parse ALLOWED_ORIGINS from env (used by docker-compose) or fallback to defaults
+_allowed_origins_raw = os.getenv("ALLOWED_ORIGINS", "")
+if _allowed_origins_raw:
+    ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_raw.split(",") if o.strip()]
+else:
+    ALLOWED_ORIGINS = ["http://82.202.143.118:8080", "http://localhost:8080"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://82.202.143.118:8080", "http://localhost:8080"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
