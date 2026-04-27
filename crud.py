@@ -32,6 +32,7 @@ class Chat(Base):
     ai = Column(Boolean, default=False)
     waiting = Column(Boolean, default=False)
     tags = Column(ARRAY(String), default=[])
+    mark = Column(String, nullable=True)
     name = Column(String(30), default="Не известно")
     messager = Column(String(16), nullable=False, default="telegram")
     messages = relationship("Message", back_populates="chat")
@@ -124,6 +125,14 @@ async def update_chat_ai(db: AsyncSession, chat_id: int, ai: bool):
     chat = await get_chat(db, chat_id)
     if chat:
         chat.ai = ai
+        await db.commit()
+        await db.refresh(chat)
+    return chat
+
+async def update_chat_mark(db: AsyncSession, chat_id: int, mark: str | None):
+    chat = await get_chat(db, chat_id)
+    if chat:
+        chat.mark = mark
         await db.commit()
         await db.refresh(chat)
     return chat

@@ -14,7 +14,7 @@ from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from sqlalchemy.ext.asyncio import AsyncSession
 from crud import (
     async_session, engine, Base, get_chats, get_chat, get_messages, create_chat,
-    create_message, update_chat_waiting, update_chat_ai, get_stats,
+    create_message, update_chat_waiting, update_chat_ai, update_chat_mark, get_stats,
     get_chats_with_last_messages, get_chat_messages, get_chat_by_uuid,
     add_chat_tag, remove_chat_tag,
     create_sticker, get_all_stickers, get_sticker_by_id, get_sticker_by_file_unique_id, delete_sticker
@@ -725,6 +725,16 @@ async def update_ai(chat_id: int, data: AIUpdate, db: AsyncSession = Depends(get
     }
     await updates_manager.broadcast(json.dumps(update_message))
     return chat
+
+class MarkUpdate(BaseModel):
+    mark: str | None
+
+@app.put("/api/chats/{chat_id}/mark")
+async def update_mark(chat_id: int, data: MarkUpdate, db: AsyncSession = Depends(get_db), _: bool = Depends(auth.require_auth)):
+    chat = await update_chat_mark(db, chat_id, data.mark)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+    return {"success": True, "chat": chat}
 
 @app.get("/api/stats")
 async def stats(db: AsyncSession = Depends(get_db), _: bool = Depends(auth.require_auth)):
