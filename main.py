@@ -431,10 +431,12 @@ APP_HOST = os.getenv("APP_HOST", "localhost")
 MINIO_PUBLIC_URL = os.getenv("MINIO_PUBLIC_URL", f"http://{APP_HOST}:9000")
 MINIO_LOGIN = os.getenv("MINIO_LOGIN")
 MINIO_PWD = os.getenv("MINIO_PWD")
+MINIO_ENDPOINT = os.getenv("MINIO_ENDPOINT", "minio:9000")
+ENABLE_BOTS = os.getenv("ENABLE_BOTS", "true").lower() == "true"
 
 BUCKET_NAME = "psih-photo"
 minio_client = Minio(
-    endpoint=f"minio:9000",
+    endpoint=MINIO_ENDPOINT,
     access_key=MINIO_LOGIN,
     secret_key=MINIO_PWD,
     secure=False  # True для HTTPS
@@ -453,27 +455,35 @@ async def lifespan(app: FastAPI):
     # Инициализируем менеджер уведомлений
     notifications.init_notification_manager(bot)
     
-    # Запускаем aiogram-бота
-    tg_task = asyncio.create_task(dp.start_polling(bot))
-    
-    # Запускаем VK бота
-    vk_task = asyncio.create_task(start_vk_bot())
+    tg_task = None
+    vk_task = None
+
+    if ENABLE_BOTS:
+        # Запускаем aiogram-бота
+        tg_task = asyncio.create_task(dp.start_polling(bot))
+        
+        # Запускаем VK бота
+        vk_task = asyncio.create_task(start_vk_bot())
+    else:
+        print("[INFO] Боты отключены (ENABLE_BOTS=false)")
     
     yield
     
-    # Завершаем aiogram-бота
-    tg_task.cancel()
-    try:
-        await tg_task
-    except asyncio.CancelledError:
-        pass
+    if tg_task:
+        # Завершаем aiogram-бота
+        tg_task.cancel()
+        try:
+            await tg_task
+        except asyncio.CancelledError:
+            pass
 
-    # Завершаем VK-бота
-    vk_task.cancel()
-    try:
-        await vk_task
-    except asyncio.CancelledError:
-        pass
+    if vk_task:
+        # Завершаем VK-бота
+        vk_task.cancel()
+        try:
+            await vk_task
+        except asyncio.CancelledError:
+            pass
 
 app = FastAPI(lifespan=lifespan)
 

@@ -1,7 +1,10 @@
+import os
 import aiohttp
 import logging
 from fastapi import HTTPException, Depends, Request
 from typing import Optional
+
+DISABLE_AUTH = os.getenv("DISABLE_AUTH", "false").lower() == "true"
 
 # Конфигурация сервиса аутентификации
 AUTH_SERVICE_BASE_URL = "http://87.242.85.68:8000"
@@ -109,4 +112,6 @@ async def require_auth(request: Request) -> bool:
     """
     Dependency для проверки аутентификации в эндпоинтах
     """
+    if DISABLE_AUTH:
+        return True
     return await verify_token(request) 
