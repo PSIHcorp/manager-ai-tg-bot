@@ -729,6 +729,15 @@ async def update_ai(chat_id: int, data: AIUpdate, db: AsyncSession = Depends(get
 class MarkUpdate(BaseModel):
     mark: str | None
 
+class LoginRequest(BaseModel):
+    email: str
+    password: str
+
+class RegisterRequest(BaseModel):
+    email: str
+    password: str
+    name: str = ""
+
 @app.put("/api/chats/{chat_id}/mark")
 async def update_mark(chat_id: int, data: MarkUpdate, db: AsyncSession = Depends(get_db), _: bool = Depends(auth.require_auth)):
     chat = await update_chat_mark(db, chat_id, data.mark)
@@ -1588,6 +1597,83 @@ async def handle_unsupported(message: types.Message):
     
     await message.answer("Извините, этот тип сообщений пока не поддерживается. Пожалуйста, напишите текстом.")
 
+
+async def _proxy_auth_token(username: str, password: str):
+    url = f"{auth.AUTH_SERVICE_BASE_URL}/api/auth/token"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                data={"username": username, "password": password},
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            ) as resp:
+                content_type = resp.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    data = await resp.json()
+                    return JSONResponse(status_code=resp.status, content=data)
+                text = await resp.text()
+                return JSONResponse(status_code=resp.status, content={"detail": text})
+    except Exception as e:
+        logging.error(f"Auth token proxy error: {e}")
+        raise HTTPException(status_code=502, detail="Auth service unavailable")
+
+@app.post("/api/auth/login")
+async def auth_login(payload: LoginRequest):
+    return await _proxy_auth_token(username=payload.email, password=payload.password)
+
+@app.post("/api/auth/token")
+async def auth_token(username: str = Form(...), password: str = Form(...)):
+    return await _proxy_auth_token(username=username, password=password)
+
+@app.post("/api/auth/register")
+async def auth_register(payload: RegisterRequest):
+    url = f"{auth.AUTH_SERVICE_BASE_URL}/api/auth/register"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                url,
+                json={
+                    "email": payload.email,
+                    "password": payload.password,
+                    "name": payload.name,
+                    "is_admin": True,
+                },
+                headers={"Content-Type": "application/json"},
+            ) as resp:
+                content_type = resp.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    data = await resp.json()
+                    return JSONResponse(status_code=resp.status, content=data)
+                text = await resp.text()
+                return JSONResponse(status_code=resp.status, content={"detail": text})
+    except Exception as e:
+        logging.error(f"Auth register proxy error: {e}")
+        raise HTTPException(status_code=502, detail="Auth service unavailable")
+
+@app.get("/api/auth/me")
+async def auth_me(request: Request):
+    token = await auth.get_token_from_header(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="Authorization header missing")
+    url = f"{auth.AUTH_SERVICE_BASE_URL}/api/auth/me"
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                url,
+                headers={
+                    "accept": "application/json",
+                    "Authorization": f"Bearer {token}",
+                },
+            ) as resp:
+                content_type = resp.headers.get("content-type", "")
+                if "application/json" in content_type:
+                    data = await resp.json()
+                    return JSONResponse(status_code=resp.status, content=data)
+                text = await resp.text()
+                return JSONResponse(status_code=resp.status, content={"detail": text})
+    except Exception as e:
+        logging.error(f"Auth me proxy error: {e}")
+        raise HTTPException(status_code=502, detail="Auth service unavailable")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=3001)
