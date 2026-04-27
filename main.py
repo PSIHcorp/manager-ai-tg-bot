@@ -17,7 +17,8 @@ from crud import (
     create_message, update_chat_waiting, update_chat_ai, update_chat_mark, get_stats,
     get_chats_with_last_messages, get_chat_messages, get_chat_by_uuid,
     add_chat_tag, remove_chat_tag,
-    create_sticker, get_all_stickers, get_sticker_by_id, get_sticker_by_file_unique_id, delete_sticker
+    create_sticker, get_all_stickers, get_sticker_by_id, get_sticker_by_file_unique_id, delete_sticker,
+    update_message, delete_message
 )
 import requests
 from pydantic import BaseModel
@@ -26,7 +27,7 @@ import json
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from sqlalchemy import select, insert
+from sqlalchemy import select, insert, text
 from crud import Message
 import crud
 from aiogram import F
@@ -453,6 +454,15 @@ minio_client = Minio(
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # Add edited_at column to messages if it doesn't exist (idempotent migration)
+        await conn.execute(text("""
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS edited_at TIMESTAMP WITH TIME ZONE
+        """))
+        await conn.execute(text("""
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS external_message_id VARCHAR
+        """))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -640,39 +650,43 @@ class MessageCreate(BaseModel):
 
 @app.post("/api/messages")
 async def create_message_endpoint(msg: MessageCreate, db: AsyncSession = Depends(get_db), _: bool = Depends(auth.require_auth)):
-    # 1. Создаем сообщение в БД
-    db_msg = await create_message(
-        db=db,
-        chat_id=msg.chat_id,
-        message=msg.message,
-        message_type=msg.message_type,
-        ai=msg.ai
-    )
-
-    # 2. Получаем информацию о чате
+    # 1. Получаем информацию о чате
     chat = await get_chat(db, msg.chat_id)
     if not chat:
         raise HTTPException(status_code=404, detail="Chat not found")
 
-    # 3. Отправляем сообщение в соответствующий мессенджер
+    # 2. Отправляем сообщение в соответствующий мессенджер
+    external_id = None
     try:
         if chat.messager == "telegram":
             # Отправка в Telegram
-            await bot.send_message(
+            tg_msg = await bot.send_message(
                 chat_id=chat.uuid,
                 text=msg.message
             )
+            external_id = str(tg_msg.message_id)
         elif chat.messager == "vk":
             # Отправка в VK
-            await asyncio.to_thread(
+            vk_msg_id = await asyncio.to_thread(
                 vk.messages.send,
                 peer_id=int(chat.uuid),
                 message=msg.message,
                 random_id=0
             )
+            external_id = str(vk_msg_id)
     except Exception as e:
         logging.error(f"Error sending message to {chat.messager}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to send message to {chat.messager}")
+
+    # 3. Создаем сообщение в БД
+    db_msg = await create_message(
+        db=db,
+        chat_id=msg.chat_id,
+        message=msg.message,
+        message_type=msg.message_type,
+        ai=msg.ai,
+        external_message_id=external_id
+    )
 
     # 4. Отправляем сообщение через WebSocket
     message_for_frontend = {
@@ -782,6 +796,88 @@ class StickerTagUpdate(BaseModel):
     tag: str
 
 
+class MessageUpdate(BaseModel):
+    message: str
+
+
+@app.put("/api/messages/{message_id}")
+async def edit_message_endpoint(
+    message_id: int,
+    data: MessageUpdate,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth.require_auth)
+):
+    # 1. Получаем сообщение и чат
+    msg = await update_message(db, message_id, data.message)
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    chat = await get_chat(db, msg.chat_id)
+    if not chat:
+        raise HTTPException(status_code=404, detail="Chat not found")
+
+    # 2. Редактируем в мессенджере, если есть external_id
+    if msg.external_message_id:
+        try:
+            if chat.messager == "telegram":
+                await bot.edit_message_text(
+                    chat_id=chat.uuid,
+                    message_id=int(msg.external_message_id),
+                    text=data.message
+                )
+            elif chat.messager == "vk":
+                await asyncio.to_thread(
+                    vk.messages.edit,
+                    peer_id=int(chat.uuid),
+                    message_id=int(msg.external_message_id),
+                    message=data.message
+                )
+        except Exception as e:
+            logging.error(f"Error editing message in {chat.messager}: {e}")
+            # Не падаем — уже обновили в БД
+
+    return {"success": True, "message_id": msg.id, "edited_at": msg.edited_at.isoformat() if msg.edited_at else None}
+
+
+@app.delete("/api/messages/{message_id}")
+async def remove_message_endpoint(
+    message_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: bool = Depends(auth.require_auth)
+):
+    # 1. Получаем сообщение перед удалением
+    from crud import Message as MessageModel
+    result = await db.execute(select(MessageModel).filter(MessageModel.id == message_id))
+    msg = result.scalar_one_or_none()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    chat = await get_chat(db, msg.chat_id)
+
+    # 2. Удаляем в мессенджере, если есть external_id
+    if msg.external_message_id and chat:
+        try:
+            if chat.messager == "telegram":
+                await bot.delete_message(
+                    chat_id=chat.uuid,
+                    message_id=int(msg.external_message_id)
+                )
+            elif chat.messager == "vk":
+                await asyncio.to_thread(
+                    vk.messages.delete,
+                    message_ids=int(msg.external_message_id),
+                    delete_for_all=1
+                )
+        except Exception as e:
+            logging.error(f"Error deleting message in {chat.messager}: {e}")
+            # Не падаем — удалим из БД в любом случае
+
+    # 3. Удаляем из БД
+    await db.delete(msg)
+    await db.commit()
+    return {"success": True}
+
+
 @app.post("/api/messages/sticker")
 async def send_sticker_message(
     data: StickerMessageCreate,
@@ -798,9 +894,11 @@ async def send_sticker_message(
         raise HTTPException(status_code=404, detail="Sticker not found")
 
     # Отправка в мессенджер
+    external_id = None
     try:
         if chat.messager == "telegram":
-            await bot.send_sticker(chat_id=chat.uuid, sticker=sticker.file_id)
+            tg_msg = await bot.send_sticker(chat_id=chat.uuid, sticker=sticker.file_id)
+            external_id = str(tg_msg.message_id)
         else:
             raise HTTPException(status_code=400, detail="Stickers are supported for Telegram only")
     except Exception as e:
@@ -814,7 +912,8 @@ async def send_sticker_message(
         message_type="answer",
         ai=False,
         created_at=datetime.now(),
-        is_sticker=True
+        is_sticker=True,
+        external_message_id=external_id
     )
     db.add(db_msg)
     await db.commit()
@@ -956,20 +1055,8 @@ async def upload_image(
         logging.error(f"MinIO upload error: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload image")
 
-    # 5. Сохраняем сообщение в БД
-    db_img = Message(
-        chat_id=chat_id,
-        message=img_url,
-        message_type="answer",
-        ai=False,
-        created_at=datetime.now(),
-        is_image=True
-    )
-    db.add(db_img)
-    await db.commit()
-    await db.refresh(db_img)
-
-    # 6. Отправляем фотографию в соответствующий мессенджер
+    # 5. Отправляем фотографию в соответствующий мессенджер
+    external_id = None
     try:
         if chat.messager == "telegram":
             # Создаем временный файл для отправки в Telegram
@@ -977,10 +1064,11 @@ async def upload_image(
                 temp_file.write(content)
                 temp_file.flush()
                 # Отправка в Telegram
-                await bot.send_photo(
+                tg_msg = await bot.send_photo(
                     chat_id=chat.uuid,
                     photo=FSInputFile(temp_file.name)
                 )
+                external_id = str(tg_msg.message_id)
             # Удаляем временный файл
             os.unlink(temp_file.name)
         elif chat.messager == "vk":
@@ -1008,16 +1096,27 @@ async def upload_image(
             )
 
             # Отправляем сообщение с фото в VK
-            await asyncio.to_thread(
+            vk_msg_id = await asyncio.to_thread(
                 vk.messages.send,
                 peer_id=int(chat.uuid),
                 attachment=f"photo{photo_data[0]['owner_id']}_{photo_data[0]['id']}",
                 random_id=0
             )
+            external_id = str(vk_msg_id)
     except Exception as e:
         logging.error(f"Error sending photo to {chat.messager}: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to send photo to {chat.messager}")
 
+    # 6. Сохраняем сообщение в БД
+    db_img = Message(
+        chat_id=chat_id,
+        message=img_url,
+        message_type="answer",
+        ai=False,
+        created_at=datetime.now(),
+        is_image=True,
+        external_message_id=external_id
+    )
     # 7. Отправляем сообщение через WebSocket
     message_for_frontend = {
         "type": "message",

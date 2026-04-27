@@ -45,6 +45,8 @@ class Message(Base):
     message_type = Column(String, nullable=False)
     ai = Column(Boolean, default=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    edited_at = Column(DateTime(timezone=True), nullable=True)
+    external_message_id = Column(String, nullable=True)
     is_image = Column(Boolean, default=False)
     is_sticker = Column(Boolean, default=False)
     chat = relationship("Chat", back_populates="messages")
@@ -102,13 +104,41 @@ async def create_chat(db: AsyncSession, uuid: str, ai: bool = True, name: str = 
         await db.rollback()
         raise
 
-async def create_message(db: AsyncSession, chat_id: int, message: str, message_type: str, ai: bool = False):
-    new_message = Message(chat_id=chat_id, message=message, message_type=message_type, ai=ai)
+async def create_message(db: AsyncSession, chat_id: int, message: str, message_type: str, ai: bool = False, external_message_id: str = None):
+    new_message = Message(chat_id=chat_id, message=message, message_type=message_type, ai=ai, external_message_id=external_message_id)
     db.add(new_message)
     try:
         await db.commit()
         await db.refresh(new_message)
         return new_message
+    except SQLAlchemyError:
+        await db.rollback()
+        raise
+
+async def update_message(db: AsyncSession, message_id: int, new_text: str):
+    result = await db.execute(select(Message).filter(Message.id == message_id))
+    msg = result.scalar_one_or_none()
+    if not msg:
+        return None
+    msg.message = new_text
+    msg.edited_at = func.now()
+    try:
+        await db.commit()
+        await db.refresh(msg)
+        return msg
+    except SQLAlchemyError:
+        await db.rollback()
+        raise
+
+async def delete_message(db: AsyncSession, message_id: int):
+    result = await db.execute(select(Message).filter(Message.id == message_id))
+    msg = result.scalar_one_or_none()
+    if not msg:
+        return False
+    try:
+        await db.delete(msg)
+        await db.commit()
+        return True
     except SQLAlchemyError:
         await db.rollback()
         raise
@@ -210,6 +240,8 @@ async def get_chat_messages(db: AsyncSession, chat_id: int) -> List[Dict[str, An
             "message_type": msg.message_type,
             "ai": msg.ai,
             "timestamp": msg.created_at.isoformat() if msg.created_at else None,
+            "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
+            "external_message_id": msg.external_message_id,
             "chatId": str(chat_id),
             "is_image": msg.is_image,
             "is_sticker": msg.is_sticker
