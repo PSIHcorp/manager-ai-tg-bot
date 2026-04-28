@@ -1182,6 +1182,10 @@ async def upload_image(
         is_image=True,
         external_message_id=external_id
     )
+    db.add(db_img)
+    await db.commit()
+    await db.refresh(db_img)
+
     # 7. Отправляем сообщение через WebSocket
     message_for_frontend = {
         "type": "message",
