@@ -26,8 +26,8 @@ from shared import get_bot
 import json
 from contextlib import asynccontextmanager
 from typing import List, Dict, Any, Optional
-from datetime import datetime
-from sqlalchemy import select, insert, text
+from datetime import datetime, timezone, timedelta
+from sqlalchemy import select, insert, text, func
 from crud import Message
 import crud
 from aiogram import F
@@ -148,7 +148,7 @@ async def handle_events():
                         message=text,
                         message_type="answer",
                         ai=True,
-                        created_at=datetime.now()
+                        created_at=func.now()
                     )
                     session.add(db_msg)
                     await session.commit()
@@ -178,7 +178,7 @@ async def handle_events():
                         message=text,
                         message_type="question",
                         ai=False,
-                        created_at=datetime.now()
+                        created_at=func.now()
                     )
                     session.add(db_msg)
                     await session.commit()
@@ -242,7 +242,7 @@ async def handle_events():
                                 message=answer,
                                 message_type="answer",
                                 ai=True,
-                                created_at=datetime.now()
+                                created_at=func.now()
                             )
                             session.add(db_ans)
                             await session.commit()
@@ -366,7 +366,7 @@ async def handle_events():
                             message=img_url,
                             message_type="answer",
                             ai=True,
-                            created_at=datetime.now(),
+                            created_at=func.now(),
                             is_image=True
                         )
                     else:
@@ -375,7 +375,7 @@ async def handle_events():
                             message=img_url,
                             message_type="question",
                             ai=False,
-                            created_at=datetime.now(),
+                            created_at=func.now(),
                             is_image=True
                         )
                     session.add(db_img)
@@ -583,7 +583,7 @@ async def messages_websocket(websocket: WebSocket):
                                 "content": message_data["content"],
                                 "message_type": "text",
                                 "ai": False,
-                                "timestamp": datetime.now().isoformat()
+                                "timestamp": datetime.now(timezone(timedelta(hours=3))).isoformat()
                             }
                             await updates_manager.broadcast(json.dumps(update_message))
                     except (ValueError, TypeError) as e:
@@ -976,7 +976,7 @@ async def send_sticker_message(
         message=sticker.emoji or "[sticker]",
         message_type="answer",
         ai=False,
-        created_at=datetime.now(),
+        created_at=func.now(),
         is_sticker=True,
         external_message_id=external_id
     )
@@ -1178,7 +1178,7 @@ async def upload_image(
         message=img_url,
         message_type="answer",
         ai=False,
-        created_at=datetime.now(),
+        created_at=func.now(),
         is_image=True,
         external_message_id=external_id
     )
@@ -1274,7 +1274,7 @@ async def cmd_start(message: Message):
             message=message.text,
             message_type="question",
             ai=False,
-            created_at=datetime.now()
+            created_at=func.now()
         )
         session.add(new_message)
         await session.commit()
@@ -1354,7 +1354,7 @@ async def cmd_notifications(message: Message):
             message=message.text,
             message_type="question",
             ai=False,
-            created_at=datetime.now()
+            created_at=func.now()
         )
         session.add(new_message)
         await session.commit()
@@ -1409,7 +1409,7 @@ async def handle_message(message: Message):
             message=message.text,
             message_type="question",
             ai=False,
-            created_at=datetime.now()
+            created_at=func.now()
         )
         session.add(new_message)
         await session.commit()
@@ -1471,7 +1471,7 @@ async def handle_message(message: Message):
                             message=answer,
                             message_type="answer",
                             ai=True,
-                            created_at=datetime.now()
+                            created_at=func.now()
                         )
                         session.add(new_answer)
                         await session.commit()
@@ -1568,7 +1568,7 @@ async def handle_photos(message: types.Message):
                 message=f"{MINIO_PUBLIC_URL}/{BUCKET_NAME}/{file_name}",
                 message_type="question",
                 ai=False,
-                created_at=datetime.now(),
+                created_at=func.now(),
                 is_image=True
             )
             session.add(new_message)
@@ -1595,7 +1595,7 @@ async def handle_photos(message: types.Message):
                     message=message.caption,
                     message_type="question",
                     ai=False,
-                    created_at=datetime.now()
+                    created_at=func.now()
                 )
                 session.add(caption_message)
                 await session.commit()
@@ -1728,7 +1728,7 @@ async def handle_unsupported(message: types.Message):
             message=f"[unsupported:{content_type}]",
             message_type="question",
             ai=False,
-            created_at=datetime.now()
+            created_at=func.now()
         )
         session.add(new_message)
         await session.commit()
