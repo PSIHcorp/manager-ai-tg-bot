@@ -684,7 +684,8 @@ async def sync_vk_chat_endpoint(
             message=text,
             message_type="answer" if is_ai else "question",
             ai=is_ai,
-            external_message_id=ext_id
+            external_message_id=ext_id,
+            created_at=datetime.fromtimestamp(msg.get('date', 0))
         )
         imported += 1
         existing_ids.add(ext_id)

@@ -5,6 +5,7 @@ from sqlalchemy.orm import sessionmaker, declarative_base, relationship, selecti
 from sqlalchemy import Column, Integer, String, Boolean, ForeignKey, DateTime, func, select, desc, ARRAY
 from sqlalchemy.exc import SQLAlchemyError
 from typing import List, Optional, Dict, Any
+from datetime import datetime
 
 # Load environment variables
 load_dotenv()
@@ -112,8 +113,10 @@ async def create_chat(db: AsyncSession, uuid: str, ai: bool = True, name: str = 
         await db.rollback()
         raise
 
-async def create_message(db: AsyncSession, chat_id: int, message: str, message_type: str, ai: bool = False, external_message_id: str = None):
+async def create_message(db: AsyncSession, chat_id: int, message: str, message_type: str, ai: bool = False, external_message_id: str = None, created_at: datetime = None):
     new_message = Message(chat_id=chat_id, message=message, message_type=message_type, ai=ai, external_message_id=external_message_id)
+    if created_at is not None:
+        new_message.created_at = created_at
     db.add(new_message)
     try:
         await db.commit()
@@ -232,9 +235,7 @@ async def get_chat_messages(db: AsyncSession, chat_id: int) -> List[Dict[str, An
     query = (
         select(Message)
         .where(Message.chat_id == chat_id)
-        .order_by(desc(Message.created_at)) # Keep ordering
-        # Removed: .limit(limit)
-        # Removed: .offset(offset)
+        .order_by(Message.created_at.asc(), Message.id.asc())
     )
     
     result = await db.execute(query);
